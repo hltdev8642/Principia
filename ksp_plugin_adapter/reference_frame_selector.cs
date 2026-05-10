@@ -552,6 +552,28 @@ internal class
                                 : Description(frame_type, selected_celestial),
           Style.Multiline(UnityEngine.GUI.skin.label),
           GUILayoutHeight(4));
+      UnityEngine.GUILayout.Label(
+          "Frame preview: " + FramePreviewText(),
+          Style.Multiline(UnityEngine.GUI.skin.label),
+          GUILayoutHeight(2));
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        if (UnityEngine.GUILayout.Button("Use current SOI body")) {
+          CelestialBody current = FlightGlobals.currentMainBody;
+          if (current != null) {
+            EffectChange(() => {
+              target_frame_selected = false;
+              selected_celestial = current;
+              if (frame_type == FrameType.BARYCENTRIC_ROTATING ||
+                  frame_type == FrameType.BODY_CENTRED_PARENT_DIRECTION ||
+                  frame_type == FrameType.ROTATING_PULSATING) {
+                frame_type = current.is_root()
+                                 ? FrameType.BODY_CENTRED_NON_ROTATING
+                                 : FrameType.BODY_CENTRED_PARENT_DIRECTION;
+              }
+            });
+          }
+        }
+      }
 
       // If the target vessel changes, the window may need to shrink.
       float new_tree_width =
@@ -875,6 +897,27 @@ internal class
         content,
         value ? Style.LitToggleButton() : Style.DarkToggleButton(),
         options) ? !value : value;
+  }
+
+  private string FramePreviewText() {
+    if (target_frame_selected && target != null) {
+      return "Target frame around " + target.orbit.referenceBody.Name();
+    }
+
+    switch (frame_type) {
+      case FrameType.BODY_CENTRED_NON_ROTATING:
+      case FrameType.BODY_SURFACE:
+        return "Centre=" + selected_celestial.Name() +
+               ", Type=" + frame_type;
+      case FrameType.BODY_CENTRED_PARENT_DIRECTION:
+      case FrameType.BARYCENTRIC_ROTATING:
+      case FrameType.ROTATING_PULSATING:
+        return "Primary=" + selected_celestial.referenceBody.Name() +
+               ", Secondary=" + selected_celestial.Name() +
+               ", Type=" + frame_type;
+      default:
+        return frame_type.ToString();
+    }
   }
 
   public readonly Dictionary<CelestialBody, bool> pinned;

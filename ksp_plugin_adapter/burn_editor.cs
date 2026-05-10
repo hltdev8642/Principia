@@ -187,6 +187,36 @@ class BurnEditor : ScalingRenderer {
       changed |= Δv_tangent_.Render(enabled : !anomalous);
       changed |= Δv_normal_.Render(enabled : !anomalous);
       changed |= Δv_binormal_.Render(enabled : !anomalous);
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        if (UnityEngine.GUILayout.Button("Zero Δv", GUILayoutWidth(2.5f))) {
+          Δv_tangent_.value = 0;
+          Δv_normal_.value = 0;
+          Δv_binormal_.value = 0;
+          changed = true;
+        }
+        if (UnityEngine.GUILayout.Button("Prograde", GUILayoutWidth(2.5f))) {
+          double magnitude = Δv();
+          Δv_tangent_.value = magnitude <= 0 ? 1 : magnitude;
+          Δv_normal_.value = 0;
+          Δv_binormal_.value = 0;
+          changed = true;
+        }
+        if (UnityEngine.GUILayout.Button("Retrograde", GUILayoutWidth(2.5f))) {
+          double magnitude = Δv();
+          Δv_tangent_.value = magnitude <= 0 ? -1 : -magnitude;
+          Δv_normal_.value = 0;
+          Δv_binormal_.value = 0;
+          changed = true;
+        }
+      }
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        UnityEngine.GUILayout.Label(
+            "Vector [T,N,B] = [" +
+            Δv_tangent_.value.ToString("0.00") + ", " +
+            Δv_normal_.value.ToString("0.00") + ", " +
+            Δv_binormal_.value.ToString("0.00") + "] m/s",
+            Style.Multiline(UnityEngine.GUI.skin.label));
+      }
       {
         var render_time_base = time_base;
         previous_coast_duration_.value_if_different =
@@ -296,6 +326,20 @@ class BurnEditor : ScalingRenderer {
             plugin.FlightPlanOptimizationDriverStart(vessel_guid, index);
           }
         }
+      }
+      double effective_exhaust_velocity =
+          specific_impulse_in_seconds_g0_ * 9.80665;
+      if (effective_exhaust_velocity > 0 &&
+          initial_mass_in_tonnes_ > 0 &&
+          Δv() > 0) {
+        double final_mass_in_tonnes =
+            initial_mass_in_tonnes_ / Math.Exp(Δv() / effective_exhaust_velocity);
+        double propellant_mass_in_tonnes =
+            Math.Max(0, initial_mass_in_tonnes_ - final_mass_in_tonnes);
+        UnityEngine.GUILayout.Label(
+            "Estimated propellant: " +
+            (propellant_mass_in_tonnes * 1000).ToString("0.0") +
+            " kg (ideal)");
       }
       UnityEngine.GUILayout.Label(engine_warning_,
                                   Style.Warning(UnityEngine.GUI.skin.label));

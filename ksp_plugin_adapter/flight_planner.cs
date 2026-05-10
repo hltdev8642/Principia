@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace principia {
@@ -226,6 +227,26 @@ class FlightPlanner : RequiredVesselSupervisedWindowRenderer {
 
   private void RenderFlightPlan(string vessel_guid) {
     using (new UnityEngine.GUILayout.VerticalScope()) {
+      RenderTabBar();
+      Style.HorizontalLine();
+
+      if (selected_tab_ == FlightPlannerTab.Optimizer) {
+        RenderOptimizerTab(vessel_guid);
+        return;
+      }
+      if (selected_tab_ == FlightPlannerTab.Transfer) {
+        RenderTransferTab(vessel_guid);
+        return;
+      }
+      if (selected_tab_ == FlightPlannerTab.Timeline) {
+        RenderTimelineTab(vessel_guid);
+        return;
+      }
+      if (selected_tab_ == FlightPlannerTab.ImportExport) {
+        RenderImportExportTab(vessel_guid);
+        return;
+      }
+
       // A change of anomalous status "tickles" the flight plan.  Note that the
       // order of the terms in the || below matters, we always want to render
       // the `final_time_`.
@@ -523,6 +544,23 @@ class FlightPlanner : RequiredVesselSupervisedWindowRenderer {
           if (RenderCoast(i, out double? orbital_period)) {
             return;
           }
+          using (new UnityEngine.GUILayout.HorizontalScope()) {
+            UnityEngine.GUILayout.Label(
+                L10N.CacheFormat("#Principia_FlightPlan_ManœuvreHeader",
+                                 i + 1));
+            if (i == 0) {
+              UnityEngine.GUILayout.Button("↑", GUILayoutWidth(1));
+            } else if (UnityEngine.GUILayout.Button("↑", GUILayoutWidth(1))) {
+              MoveManœuvre(vessel_guid, i, i - 1);
+              return;
+            }
+            if (i >= burn_editors_.Count - 1) {
+              UnityEngine.GUILayout.Button("↓", GUILayoutWidth(1));
+            } else if (UnityEngine.GUILayout.Button("↓", GUILayoutWidth(1))) {
+              MoveManœuvre(vessel_guid, i, i + 1);
+              return;
+            }
+          }
           Style.HorizontalLine();
           BurnEditor burn = burn_editors_[i];
           switch (burn.Render(
@@ -564,6 +602,552 @@ class FlightPlanner : RequiredVesselSupervisedWindowRenderer {
         }
       }
     }
+  }
+
+  private void RenderTabBar() {
+    using (new UnityEngine.GUILayout.HorizontalScope()) {
+      RenderTabButton(FlightPlannerTab.Planner, "Planner");
+      RenderTabButton(FlightPlannerTab.Optimizer, "Optimizer");
+      RenderTabButton(FlightPlannerTab.Transfer, "Transfer");
+      RenderTabButton(FlightPlannerTab.Timeline, "Timeline");
+      RenderTabButton(FlightPlannerTab.ImportExport, "Import/Export");
+    }
+  }
+
+  private void RenderTabButton(FlightPlannerTab tab, string label) {
+    if (UnityEngine.GUILayout.Toggle(
+            selected_tab_ == tab,
+            label,
+            "Button",
+            GUILayoutWidth(3))) {
+      selected_tab_ = tab;
+    }
+  }
+
+  private void RenderOptimizerTab(string vessel_guid) {
+    if (burn_editors_ == null || burn_editors_.Count == 0) {
+      UnityEngine.GUILayout.Label("Add at least one manoeuvre to optimize.");
+      return;
+    }
+
+    int in_progress =
+        plugin.FlightPlanOptimizationDriverInProgress(vessel_guid);
+    UnityEngine.GUILayout.Label(
+        in_progress >= 0
+            ? "Optimizer status: running on manoeuvre #" + (in_progress + 1)
+            : "Optimizer status: idle");
+
+    if (adapter_.plotting_frame_selector_.Centre() is CelestialBody centre) {
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        UnityEngine.GUILayout.Label("Target altitude");
+        string altitude_text = UnityEngine.GUILayout.TextField(
+            optimization_altitude_.FormatN(0),
+            GUILayoutWidth(4));
+        UnityEngine.GUILayout.Label("m");
+        if (double.TryParse(altitude_text,
+                            System.Globalization.NumberStyles.Any,
+                            Culture.culture,
+                            out double altitude_candidate) &&
+            altitude_candidate >= 0) {
+          optimization_altitude_ = altitude_candidate;
+        }
+      }
+
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        UnityEngine.GUILayout.Label("Target inclination");
+        string inclination_text = UnityEngine.GUILayout.TextField(
+            optimization_inclination_in_degrees_.HasValue
+                ? optimization_inclination_in_degrees_.Value.FormatN(0)
+                : "Any",
+            GUILayoutWidth(4));
+        UnityEngine.GUILayout.Label("deg");
+        bool optimize_inclination = UnityEngine.GUILayout.Toggle(
+            optimization_inclination_in_degrees_.HasValue,
+            optimization_inclination_in_degrees_.HasValue ? "Constrained"
+                                                          : "Unconstrained");
+        if (!optimize_inclination) {
+          optimization_inclination_in_degrees_ = null;
+        } else if (double.TryParse(inclination_text,
+                                   System.Globalization.NumberStyles.Any,
+                                   Culture.culture,
+                                   out double inclination_candidate)) {
+          optimization_inclination_in_degrees_ = Math.Max(
+              Math.Min(180, inclination_candidate),
+              -180);
+        }
+      }
+
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        UnityEngine.GUILayout.Label("Selected manoeuvre");
+        if (selected_optimization_manœuvre_ > 0 &&
+            UnityEngine.GUILayout.Button("−", GUILayoutWidth(1))) {
+          --selected_optimization_manœuvre_;
+        }
+        UnityEngine.GUILayout.TextArea(
+            (selected_optimization_manœuvre_ + 1).ToString(),
+            GUILayoutWidth(2));
+        if (selected_optimization_manœuvre_ < burn_editors_.Count - 1 &&
+            UnityEngine.GUILayout.Button("+", GUILayoutWidth(1))) {
+          ++selected_optimization_manœuvre_;
+        }
+      }
+
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        if (UnityEngine.GUILayout.Button("Rebuild optimizer")) {
+          ResetOptimizer(vessel_guid,
+                         centre,
+                         optimization_altitude_,
+                         optimization_inclination_in_degrees_);
+        }
+        if (UnityEngine.GUILayout.Button("Optimize selected") &&
+            in_progress == -1) {
+          plugin.FlightPlanOptimizationDriverStart(vessel_guid,
+                                                   selected_optimization_manœuvre_);
+        }
+      }
+    } else {
+      UnityEngine.GUILayout.Label(
+          "Switch to a body-centred plotting frame to use optimization.");
+    }
+  }
+
+  private void RenderTransferTab(string vessel_guid) {
+    InitializeTransferBodies();
+
+    using (new UnityEngine.GUILayout.HorizontalScope()) {
+      UnityEngine.GUILayout.Label("Origin");
+      if (UnityEngine.GUILayout.Button("<", GUILayoutWidth(1))) {
+        CycleTransferBody(is_origin : true, direction : -1);
+      }
+      UnityEngine.GUILayout.TextArea(
+          transfer_origin_?.bodyName ?? "(none)",
+          GUILayoutWidth(5));
+      if (UnityEngine.GUILayout.Button(">", GUILayoutWidth(1))) {
+        CycleTransferBody(is_origin : true, direction : 1);
+      }
+    }
+
+    using (new UnityEngine.GUILayout.HorizontalScope()) {
+      UnityEngine.GUILayout.Label("Target");
+      if (UnityEngine.GUILayout.Button("<", GUILayoutWidth(1))) {
+        CycleTransferBody(is_origin : false, direction : -1);
+      }
+      UnityEngine.GUILayout.TextArea(
+          transfer_target_?.bodyName ?? "(none)",
+          GUILayoutWidth(5));
+      if (UnityEngine.GUILayout.Button(">", GUILayoutWidth(1))) {
+        CycleTransferBody(is_origin : false, direction : 1);
+      }
+    }
+
+    if (!TryComputeHohmannTransfer(out TransferEstimate estimate,
+                                   out string issue)) {
+      UnityEngine.GUILayout.Label(issue, Style.Warning(UnityEngine.GUI.skin.label));
+      return;
+    }
+
+    UnityEngine.GUILayout.Label("Transfer summary");
+    UnityEngine.GUILayout.Label(
+        "Window in " + FormatPositiveTimeSpan(estimate.wait_time));
+    UnityEngine.GUILayout.Label(
+        "Transfer time " + FormatPositiveTimeSpan(estimate.transfer_time));
+    UnityEngine.GUILayout.Label(
+        "Ejection Δv " + estimate.ejection_Δv.ToString("0.000") + " m/s");
+    UnityEngine.GUILayout.Label(
+        "Capture Δv " + estimate.capture_Δv.ToString("0.000") + " m/s");
+
+    using (new UnityEngine.GUILayout.HorizontalScope()) {
+      if (UnityEngine.GUILayout.Button("Create transfer seed burn")) {
+        CreateTransferSeedBurn(vessel_guid, estimate);
+      }
+      if (UnityEngine.GUILayout.Button("Copy summary")) {
+        transfer_summary_ =
+            transfer_origin_.bodyName + " -> " + transfer_target_.bodyName +
+            ", window " + FormatPositiveTimeSpan(estimate.wait_time) +
+            ", Δv " + estimate.ejection_Δv.ToString("0.000") + " m/s";
+      }
+    }
+    UnityEngine.GUILayout.Label(transfer_summary_);
+  }
+
+  private void RenderTimelineTab(string vessel_guid) {
+    if (!plugin.FlightPlanExists(vessel_guid)) {
+      UnityEngine.GUILayout.Label("No active flight plan.");
+      return;
+    }
+
+    double initial_time = plugin.FlightPlanGetInitialTime(vessel_guid);
+    double final_time = plugin.FlightPlanGetDesiredFinalTime(vessel_guid);
+    if (!timeline_initialized_) {
+      timeline_time_ = plugin.CurrentTime();
+      timeline_initialized_ = true;
+    }
+    timeline_time_ = Math.Max(initial_time, Math.Min(final_time, timeline_time_));
+
+    UnityEngine.GUILayout.Label("Trajectory timeline");
+    timeline_time_ = UnityEngine.GUILayout.HorizontalSlider(
+        (float)timeline_time_,
+        (float)initial_time,
+        (float)final_time);
+    UnityEngine.GUILayout.Label(
+        "T + " + FormatPositiveTimeSpan(timeline_time_ - initial_time));
+    UnityEngine.GUILayout.Label(
+        "Absolute: " + FormatTimeSpan(timeline_time_));
+
+    using (new UnityEngine.GUILayout.HorizontalScope()) {
+      if (UnityEngine.GUILayout.Button("Warp to cursor")) {
+        TimeWarp.fetch.WarpTo(timeline_time_);
+      }
+      if (UnityEngine.GUILayout.Button("Set plan end to cursor")) {
+        var status = plugin.FlightPlanSetDesiredFinalTime(vessel_guid,
+                                                          timeline_time_);
+        UpdateStatus(status, null);
+      }
+    }
+
+    UnityEngine.GUILayout.Label("Manoeuvre markers");
+    for (int i = 0; i < burn_editors_.Count; ++i) {
+      NavigationManoeuvre manœuvre = plugin.FlightPlanGetManoeuvre(vessel_guid,
+                                                                    i);
+      using (new UnityEngine.GUILayout.HorizontalScope()) {
+        UnityEngine.GUILayout.Label(
+            "#" + (i + 1) + " @ " +
+            FormatPositiveTimeSpan(
+                manœuvre.burn.initial_time - initial_time));
+        if (UnityEngine.GUILayout.Button("Go", GUILayoutWidth(1.5f))) {
+          timeline_time_ = manœuvre.burn.initial_time;
+        }
+      }
+    }
+  }
+
+  private void RenderImportExportTab(string vessel_guid) {
+    EnsurePlanDirectoryExists();
+    RefreshPlanFiles();
+
+    UnityEngine.GUILayout.Label("Flight plan file exchange");
+    if (UnityEngine.GUILayout.Button("Export selected plan")) {
+      ExportCurrentFlightPlan(vessel_guid);
+    }
+
+    using (new UnityEngine.GUILayout.HorizontalScope()) {
+      if (available_plan_files_.Count == 0) {
+        UnityEngine.GUILayout.Label("No saved plans found.");
+      } else {
+        if (UnityEngine.GUILayout.Button("<", GUILayoutWidth(1))) {
+          selected_plan_file_index_ =
+              (selected_plan_file_index_ - 1 + available_plan_files_.Count) %
+              available_plan_files_.Count;
+        }
+        UnityEngine.GUILayout.TextArea(
+            Path.GetFileName(available_plan_files_[selected_plan_file_index_]),
+            GUILayoutWidth(8));
+        if (UnityEngine.GUILayout.Button(">", GUILayoutWidth(1))) {
+          selected_plan_file_index_ =
+              (selected_plan_file_index_ + 1) % available_plan_files_.Count;
+        }
+      }
+    }
+
+    if (available_plan_files_.Count > 0 &&
+        UnityEngine.GUILayout.Button("Import into selected flight plan slot")) {
+      ImportFlightPlan(vessel_guid,
+                       available_plan_files_[selected_plan_file_index_]);
+    }
+    UnityEngine.GUILayout.Label(io_status_message_);
+  }
+
+  private bool MoveManœuvre(string vessel_guid, int from, int to) {
+    if (from < 0 || to < 0 || from >= burn_editors_.Count || to >= burn_editors_.Count) {
+      return false;
+    }
+    NavigationManoeuvre moving = plugin.FlightPlanGetManoeuvre(vessel_guid,
+                                                                from);
+    var remove_status = plugin.FlightPlanRemove(vessel_guid, from);
+    UpdateStatus(remove_status, from);
+    if (!remove_status.ok()) {
+      return false;
+    }
+
+    if (to > from) {
+      --to;
+    }
+    var insert_status = plugin.FlightPlanInsert(vessel_guid,
+                                                moving.burn,
+                                                to);
+    UpdateStatus(insert_status, to);
+    if (!insert_status.ok()) {
+      plugin.FlightPlanInsert(vessel_guid, moving.burn, from);
+      return false;
+    }
+
+    BurnEditor editor = burn_editors_[from];
+    burn_editors_.RemoveAt(from);
+    burn_editors_.Insert(to, editor);
+    UpdateBurnEditorIndices(vessel_guid);
+    ResetOptimizer(vessel_guid);
+    return true;
+  }
+
+  private void InitializeTransferBodies() {
+    if (transfer_origin_ == null) {
+      transfer_origin_ = FlightGlobals.currentMainBody ?? FlightGlobals.GetHomeBody();
+    }
+    if (transfer_target_ == null) {
+      transfer_target_ = transfer_origin_.orbitingBodies.FirstOrDefault() ??
+                         transfer_origin_.referenceBody ??
+                         transfer_origin_;
+    }
+  }
+
+  private void CycleTransferBody(bool is_origin, int direction) {
+    InitializeTransferBodies();
+    CelestialBody basis = is_origin ? transfer_origin_ : transfer_target_;
+    CelestialBody parent = basis?.referenceBody ??
+                           transfer_origin_?.referenceBody ??
+                           FlightGlobals.GetHomeBody().referenceBody;
+    List<CelestialBody> candidates = parent?.orbitingBodies?.ToList() ??
+                                     FlightGlobals.Bodies.ToList();
+    if (candidates.Count == 0) {
+      return;
+    }
+    int index = candidates.IndexOf(basis);
+    if (index < 0) {
+      index = 0;
+    }
+    index = (index + direction + candidates.Count) % candidates.Count;
+    if (is_origin) {
+      transfer_origin_ = candidates[index];
+    } else {
+      transfer_target_ = candidates[index];
+    }
+  }
+
+  private bool TryComputeHohmannTransfer(out TransferEstimate estimate,
+                                         out string issue) {
+    estimate = default;
+    issue = null;
+    if (transfer_origin_ == null || transfer_target_ == null) {
+      issue = "Select both origin and target bodies.";
+      return false;
+    }
+    if (transfer_origin_ == transfer_target_) {
+      issue = "Origin and target must be different bodies.";
+      return false;
+    }
+    if (transfer_origin_.referenceBody != transfer_target_.referenceBody ||
+        transfer_origin_.orbit == null ||
+        transfer_target_.orbit == null) {
+      issue = "Hohmann planning requires two sibling orbiters of the same primary body.";
+      return false;
+    }
+
+    CelestialBody primary = transfer_origin_.referenceBody;
+    double μ = primary.gravParameter;
+    double r1 = transfer_origin_.orbit.semiMajorAxis;
+    double r2 = transfer_target_.orbit.semiMajorAxis;
+    double a_transfer = 0.5 * (r1 + r2);
+    double transfer_time = Math.PI * Math.Sqrt(a_transfer * a_transfer * a_transfer / μ);
+    double v1 = Math.Sqrt(μ / r1);
+    double v2 = Math.Sqrt(μ / r2);
+    double v_transfer_periapsis = Math.Sqrt(μ * (2 / r1 - 1 / a_transfer));
+    double v_transfer_apoapsis = Math.Sqrt(μ * (2 / r2 - 1 / a_transfer));
+    double ejection_Δv = Math.Abs(v_transfer_periapsis - v1);
+    double capture_Δv = Math.Abs(v2 - v_transfer_apoapsis);
+
+    double n1 = 2 * Math.PI / transfer_origin_.orbit.period;
+    double n2 = 2 * Math.PI / transfer_target_.orbit.period;
+    double synodic_rate = Math.Abs(n1 - n2);
+    if (synodic_rate <= 0) {
+      issue = "Unable to compute a synodic period for these orbits.";
+      return false;
+    }
+
+    double current_phase = NormalizeAngle(
+        (transfer_target_.orbit.LAN + transfer_target_.orbit.argumentOfPeriapsis +
+         transfer_target_.orbit.trueAnomaly) -
+        (transfer_origin_.orbit.LAN + transfer_origin_.orbit.argumentOfPeriapsis +
+         transfer_origin_.orbit.trueAnomaly));
+    double required_phase = NormalizeAngle(Math.PI - n2 * transfer_time);
+    double wait_time = NormalizeAngle(required_phase - current_phase) / synodic_rate;
+
+    estimate = new TransferEstimate {
+        wait_time = wait_time,
+        transfer_time = transfer_time,
+        ejection_Δv = ejection_Δv,
+        capture_Δv = capture_Δv
+    };
+    return true;
+  }
+
+  private void CreateTransferSeedBurn(string vessel_guid, TransferEstimate estimate) {
+    if (!plugin.FlightPlanExists(vessel_guid)) {
+      plugin.FlightPlanCreate(vessel_guid,
+                              plugin.CurrentTime() + 60,
+                              predicted_vessel.GetTotalMass());
+      ClearBurnEditors();
+      UpdateVesselAndBurnEditors();
+    }
+
+    double initial_time = plugin.CurrentTime() + estimate.wait_time;
+    var temporary_editor = new BurnEditor(adapter_,
+                                          predicted_vessel,
+                                          initial_time,
+                                          get_burn_at_index : i => null);
+    Burn seed = temporary_editor.Burn();
+    temporary_editor.Close();
+    seed.initial_time = initial_time;
+    seed.delta_v = new XYZ { x = estimate.ejection_Δv, y = 0, z = 0 };
+    var status = plugin.FlightPlanInsert(vessel_guid,
+                                         seed,
+                                         plugin.FlightPlanNumberOfManoeuvres(vessel_guid));
+    UpdateStatus(status, null);
+    if (status.ok()) {
+      io_status_message_ = "Transfer seed burn added to the end of the plan.";
+      ClearBurnEditors();
+      UpdateVesselAndBurnEditors();
+    }
+  }
+
+  private static double NormalizeAngle(double angle) {
+    double two_π = 2 * Math.PI;
+    double normalized = angle % two_π;
+    if (normalized < 0) {
+      normalized += two_π;
+    }
+    return normalized;
+  }
+
+  private void EnsurePlanDirectoryExists() {
+    if (!Directory.Exists(plan_exchange_directory_)) {
+      Directory.CreateDirectory(plan_exchange_directory_);
+    }
+  }
+
+  private void RefreshPlanFiles() {
+    EnsurePlanDirectoryExists();
+    available_plan_files_ = Directory.GetFiles(plan_exchange_directory_, "*.cfg")
+        .OrderBy(path => path)
+        .ToList();
+    if (selected_plan_file_index_ >= available_plan_files_.Count) {
+      selected_plan_file_index_ = Math.Max(0, available_plan_files_.Count - 1);
+    }
+  }
+
+  private void ExportCurrentFlightPlan(string vessel_guid) {
+    if (!plugin.FlightPlanExists(vessel_guid)) {
+      io_status_message_ = "No active flight plan to export.";
+      return;
+    }
+
+    var root = new ConfigNode("PRINCIPIA_FLIGHT_PLAN");
+    root.AddValue("vessel_guid", vessel_guid);
+    root.AddValue("vessel_name", predicted_vessel.vesselName);
+    root.AddValue("initial_time", plugin.FlightPlanGetInitialTime(vessel_guid));
+    root.AddValue("desired_final_time", plugin.FlightPlanGetDesiredFinalTime(vessel_guid));
+    int manoeuvres = plugin.FlightPlanNumberOfManoeuvres(vessel_guid);
+    for (int i = 0; i < manoeuvres; ++i) {
+      NavigationManoeuvre manœuvre = plugin.FlightPlanGetManoeuvre(vessel_guid, i);
+      Burn burn = manœuvre.burn;
+      ConfigNode node = root.AddNode("MANOEUVRE");
+      node.AddValue("initial_time", burn.initial_time);
+      node.AddValue("thrust_in_kilonewtons", burn.thrust_in_kilonewtons);
+      node.AddValue("specific_impulse_in_seconds_g0",
+                    burn.specific_impulse_in_seconds_g0);
+      node.AddValue("is_inertially_fixed", burn.is_inertially_fixed);
+      node.AddValue("delta_v_x", burn.delta_v.x);
+      node.AddValue("delta_v_y", burn.delta_v.y);
+      node.AddValue("delta_v_z", burn.delta_v.z);
+      node.AddValue("frame_extension", (int)burn.frame.Extension);
+      node.AddValue("frame_centre", burn.frame.CentreIndex);
+      node.AddValue("frame_primary", string.Join(",", burn.frame.PrimaryIndices));
+      node.AddValue("frame_secondary", string.Join(",", burn.frame.SecondaryIndices));
+    }
+
+    string safe_name = string.Concat(
+        (predicted_vessel.vesselName ?? "vessel").Select(
+            c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
+    string path = Path.Combine(plan_exchange_directory_,
+                               safe_name + "_" +
+                               DateTime.UtcNow.ToString("yyyyMMdd_HHmmss") +
+                               ".cfg");
+    root.Save(path);
+    io_status_message_ = "Exported flight plan to " + Path.GetFileName(path);
+    RefreshPlanFiles();
+  }
+
+  private void ImportFlightPlan(string vessel_guid, string path) {
+    ConfigNode root = ConfigNode.Load(path);
+    if (root == null) {
+      io_status_message_ = "Import failed: could not read file.";
+      return;
+    }
+
+    if (plugin.FlightPlanExists(vessel_guid)) {
+      plugin.FlightPlanDelete(vessel_guid);
+    }
+
+    double initial_time =
+        double.Parse(root.GetUniqueValue("initial_time"), Culture.culture);
+    plugin.FlightPlanCreate(vessel_guid,
+                            initial_time,
+                            predicted_vessel.GetTotalMass());
+
+    ConfigNode[] manoeuvre_nodes = root.GetNodes("MANOEUVRE");
+    for (int i = 0; i < manoeuvre_nodes.Length; ++i) {
+      ConfigNode node = manoeuvre_nodes[i];
+      Burn burn = new Burn {
+          initial_time = double.Parse(node.GetUniqueValue("initial_time"),
+                                      Culture.culture),
+          thrust_in_kilonewtons =
+              double.Parse(node.GetUniqueValue("thrust_in_kilonewtons"),
+                           Culture.culture),
+          specific_impulse_in_seconds_g0 =
+              double.Parse(node.GetUniqueValue("specific_impulse_in_seconds_g0"),
+                           Culture.culture),
+          is_inertially_fixed = bool.Parse(node.GetUniqueValue("is_inertially_fixed")),
+          delta_v = new XYZ {
+              x = double.Parse(node.GetUniqueValue("delta_v_x"), Culture.culture),
+              y = double.Parse(node.GetUniqueValue("delta_v_y"), Culture.culture),
+              z = double.Parse(node.GetUniqueValue("delta_v_z"), Culture.culture)
+          },
+          frame = new NavigationFrameParameters {
+              Extension = (FrameType)int.Parse(node.GetUniqueValue("frame_extension")),
+              CentreIndex = int.Parse(node.GetUniqueValue("frame_centre")),
+              PrimaryIndices = ParseIndices(node.GetAtMostOneValue("frame_primary")),
+              SecondaryIndices = ParseIndices(node.GetAtMostOneValue("frame_secondary"))
+          }
+      };
+
+      var status = plugin.FlightPlanInsert(vessel_guid, burn, i);
+      UpdateStatus(status, i);
+      if (!status.ok()) {
+        io_status_message_ = "Import failed while inserting manoeuvre #" + (i + 1);
+        return;
+      }
+    }
+
+    string desired_final_time_text = root.GetAtMostOneValue("desired_final_time");
+    if (desired_final_time_text != null) {
+      plugin.FlightPlanSetDesiredFinalTime(
+          vessel_guid,
+          double.Parse(desired_final_time_text, Culture.culture));
+    }
+
+    ClearBurnEditors();
+    UpdateVesselAndBurnEditors();
+    io_status_message_ = "Imported " + manoeuvre_nodes.Length + " manoeuvre(s).";
+  }
+
+  private static int[] ParseIndices(string csv) {
+    if (string.IsNullOrWhiteSpace(csv)) {
+      return new int[0];
+    }
+    return csv.Split(',')
+              .Select(s => s.Trim())
+              .Where(s => s.Length > 0)
+              .Select(int.Parse)
+              .ToArray();
   }
 
   private void RenderUpcomingEvents() {
@@ -971,6 +1555,40 @@ class FlightPlanner : RequiredVesselSupervisedWindowRenderer {
   private double? optimization_inclination_in_degrees_ =
       default_optimization_inclination_in_degrees;
   private NavigationFrameParameters optimization_reference_frame_parameters_;
+
+  private enum FlightPlannerTab {
+    Planner,
+    Optimizer,
+    Transfer,
+    Timeline,
+    ImportExport,
+  }
+
+  private struct TransferEstimate {
+    public double wait_time;
+    public double transfer_time;
+    public double ejection_Δv;
+    public double capture_Δv;
+  }
+
+  private FlightPlannerTab selected_tab_ = FlightPlannerTab.Planner;
+  private int selected_optimization_manœuvre_ = 0;
+
+  private CelestialBody transfer_origin_;
+  private CelestialBody transfer_target_;
+  private string transfer_summary_ = "";
+
+  private bool timeline_initialized_ = false;
+  private double timeline_time_ = double.NaN;
+
+  private readonly string plan_exchange_directory_ =
+      Path.Combine(KSPUtil.ApplicationRootPath,
+                   "GameData",
+                   "Principia",
+                   "FlightPlans");
+  private List<string> available_plan_files_ = new List<string>();
+  private int selected_plan_file_index_ = 0;
+  private string io_status_message_ = "";
 }
 
 }  // namespace ksp_plugin_adapter
